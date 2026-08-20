@@ -1,0 +1,96 @@
+name: Sync Upstream (code, tags & releases)
+
+# 自动把上游 OpenHRTT/wloc 的代码、tags 和 Releases 同步到本 fork。
+# 触发方式：
+#   1) 每 6 小时自动运行一次（schedule）
+#   2) 手动触发：仓库 Actions 页面 -> Sync Upstream -> Run workflow
+# 注意：fork 里需要先在 Actions 页签点一次 "I understand my workflows, go ahead and enable them" 启用。
+
+on:
+  schedule:
+    - cron: '17 0,6,12,18 * * *'   # 每天 00:17 / 06:17 / 12:17 / 18:17（UTC）
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync branches & tags from upstream
+        env:
+          UPSTREAM: OpenHRTT/wloc
+        run: |
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM}.git"
+          git fetch upstream --tags --force
+          # 把上游 main 合并进本 fork（不用 force，保留本 fork 自己的提交，比如本工作流文件）
+          git merge --no-edit upstream/main
+          git push origin main
+          git push origin --tags --force
+          echo "branches & tags synced OK"
+
+      - name: Sync releases from upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: OpenHRTT/wloc
+          FORK_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tmpdir=$(mktemp -d)
+          trap 'rm -rf "$tmpdir"' EXIT
+
+          created=0
+          skipped=0
+
+          while IFS= read -r line; do
+            rel=$(printf '%s' "$line" | base64 -d)
+            tag=$(printf '%s' "$rel" | jq -r .tag_name)
+            name=$(printf '%s' "$rel" | jq -r .name)
+            prerelease=$(printf '%s' "$rel" | jq -r .prerelease)
+            bodyfile="$tmpdir/body-${tag}.md"
+            printf '%s' "$rel" | jq -r .body > "$bodyfile"
+
+            # 1) 创建缺失的 release（标题、说明、prerelease 标记均与上游一致）
+            if gh release view "$tag" --repo "$FORK_REPO" >/dev/null 2>&1; then
+              echo "release '${tag}' already exists in fork"
+              skipped=$((skipped + 1))
+            else
+              args=(--repo "$FORK_REPO" --title "$name" --notes-file "$bodyfile")
+              if [ "$prerelease" = "true" ]; then
+                args+=(--prerelease)
+              fi
+              gh release create "$tag" "${args[@]}"
+              echo "> created release '${tag}'"
+              created=$((created + 1))
+            fi
+
+            # 2) 上传缺失的附件（已有的附件跳过）
+            while IFS=$'\t' read -r aname aurl; do
+              if gh release view "$tag" --repo "$FORK_REPO" --json assets -q '.assets[].name' | grep -qxF "$aname"; then
+                echo "  asset '${aname}' already present"
+              else
+                curl -fsSL "$aurl" -o "$tmpdir/$aname"
+                gh release upload "$tag" "$tmpdir/$aname" --repo "$FORK_REPO" --clobber
+                echo "  > uploaded asset '${aname}'"
+              fi
+            done < <(printf '%s' "$rel" | jq -r '.assets[] | [.name, .browser_download_url] | @tsv')
+
+          done < <(gh api "repos/$UPSTREAM/releases" --paginate -q '.[] | @base64')
+
+          echo "Release sync finished: created=$created skipped=$skipped"
