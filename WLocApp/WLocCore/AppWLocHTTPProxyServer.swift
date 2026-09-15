@@ -12,6 +12,8 @@ enum AppWLocProxyError: Error, LocalizedError {
     case tlsIdentityMissing(Error)
     case tlsStreamCreateFailed
     case tlsOpenFailed
+    case tlsHandshakeFailed(Error)
+    case tlsPeerClosedBeforeHTTPRequest
     case httpRequestInvalid
     case upstreamFailed
 
@@ -32,7 +34,11 @@ enum AppWLocProxyError: Error, LocalizedError {
         case .tlsStreamCreateFailed:
             return "\(AppWLocConfig.displayName) TLS 流创建失败"
         case .tlsOpenFailed:
-            return "\(AppWLocConfig.displayName) TLS 握手失败"
+            return "\(AppWLocConfig.displayName) TLS 流启动失败"
+        case .tlsHandshakeFailed(let error):
+            return "\(AppWLocConfig.displayName) TLS 握手失败：\(error.localizedDescription)"
+        case .tlsPeerClosedBeforeHTTPRequest:
+            return "\(AppWLocConfig.displayName) 客户端在发送 HTTPS 请求前关闭了 TLS 连接（证书信任或证书绑定校验未通过）"
         case .httpRequestInvalid:
             return "\(AppWLocConfig.displayName) HTTPS 请求解析失败"
         case .upstreamFailed:
@@ -197,7 +203,9 @@ final class AppWLocHTTPProxyServer {
         guard CFReadStreamOpen(cfReadStream), CFWriteStreamOpen(cfWriteStream) else {
             throw AppWLocProxyError.tlsOpenFailed
         }
-        AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 本地代理 TLS 已打开 host=\(host)")
+        // CFReadStreamOpen/CFWriteStreamOpen 只启动流。服务端 TLS 握手会在第一次
+        // read/write 时真正推进，不能在这里把“流已启动”误报成“握手成功”。
+        AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 本地代理 TLS 流已启动 host=\(host)，等待客户端完成握手")
         defer {
             inputStream.close()
             outputStream.close()
@@ -604,24 +612,27 @@ final class AppWLocHTTPProxyServer {
             if count > 0 {
                 data.append(contentsOf: buffer.prefix(count))
             } else {
-                #if os(macOS)
-                logMacOSStreamReadFailure(
+                logTLSOrHTTPReadFailure(
                     stage: "读取 HTTPS Request Header",
                     stream: stream,
                     readResult: count,
                     receivedData: data
                 )
-                #endif
+
+                if data.isEmpty {
+                    if let streamError = stream.streamError {
+                        throw AppWLocProxyError.tlsHandshakeFailed(streamError)
+                    }
+                    throw AppWLocProxyError.tlsPeerClosedBeforeHTTPRequest
+                }
                 throw AppWLocProxyError.httpRequestInvalid
             }
         }
-        #if os(macOS)
         if data.range(of: Data("\r\n\r\n".utf8)) == nil {
             AppWLocUtils.debugLog(
-                "\(AppWLocConfig.displayName) macOS Request Header 超出限制，已读取=\(data.count) bytes，hex前缀=\(formatHexPrefix(data))"
+                "\(AppWLocConfig.displayName) Request Header 超出限制，已读取=\(data.count) bytes，hex前缀=\(formatHexPrefix(data))"
             )
         }
-        #endif
         return data
     }
 
@@ -635,22 +646,19 @@ final class AppWLocHTTPProxyServer {
             if readCount > 0 {
                 data.append(contentsOf: buffer.prefix(readCount))
             } else {
-                #if os(macOS)
-                logMacOSStreamReadFailure(
+                logTLSOrHTTPReadFailure(
                     stage: "读取 HTTPS Request Body，期望=\(count) bytes，已读取=\(data.count) bytes",
                     stream: stream,
                     readResult: readCount,
                     receivedData: data
                 )
-                #endif
                 throw AppWLocProxyError.httpRequestInvalid
             }
         }
         return data
     }
 
-    #if os(macOS)
-    private func logMacOSStreamReadFailure(
+    private func logTLSOrHTTPReadFailure(
         stage: String,
         stream: InputStream,
         readResult: Int,
@@ -659,7 +667,7 @@ final class AppWLocHTTPProxyServer {
         let streamError = stream.streamError as NSError?
         AppWLocUtils.debugLog(
             [
-                "\(AppWLocConfig.displayName) macOS TLS/HTTP 读取失败",
+                "\(AppWLocConfig.displayName) TLS/HTTP 读取失败",
                 "阶段：\(stage)",
                 "read 返回：\(readResult)",
                 "stream status：\(stream.streamStatus.rawValue)",
@@ -669,7 +677,6 @@ final class AppWLocHTTPProxyServer {
             ].joined(separator: "\n")
         )
     }
-    #endif
 
     private func writeAll(_ data: Data, to fd: Int32) throws {
         try data.withUnsafeBytes { rawBuffer in

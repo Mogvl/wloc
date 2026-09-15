@@ -1,14 +1,81 @@
 import CoreLocation
 import Foundation
 
-enum AppWLocCoordinateSystem {
+enum AppWLocCoordinateSystem: CaseIterable {
     case wgs84
     case gcj02
     case bd09
     case apple
+
+    var inputTitle: String {
+        switch self {
+        case .wgs84:
+            return "Google / GPS（WGS-84）"
+        case .gcj02:
+            return "高德 / 腾讯（GCJ-02）"
+        case .bd09:
+            return "百度（BD-09）"
+        case .apple:
+            return "Apple 地图"
+        }
+    }
+}
+
+enum AppWLocCoordinateInputError: Error, LocalizedError {
+    case missingLatitude
+    case missingLongitude
+    case invalidLatitude
+    case invalidLongitude
+    case conversionFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .missingLatitude:
+            return "请输入纬度"
+        case .missingLongitude:
+            return "请输入经度"
+        case .invalidLatitude:
+            return "纬度必须是 -90 到 90 之间的数字"
+        case .invalidLongitude:
+            return "经度必须是 -180 到 180 之间的数字"
+        case .conversionFailed:
+            return "转换后的 Apple 地图坐标无效"
+        }
+    }
 }
 
 enum AppWLocCoordinateTool {
+    /// 校验用户输入的经纬度，并统一转换为当前 Apple 地图可直接使用的坐标。
+    static func appleMapCoordinate(
+        latitudeText: String,
+        longitudeText: String,
+        sourceSystem: AppWLocCoordinateSystem
+    ) throws -> CLLocationCoordinate2D {
+        let latitudeText = latitudeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let longitudeText = longitudeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !latitudeText.isEmpty else {
+            throw AppWLocCoordinateInputError.missingLatitude
+        }
+        guard !longitudeText.isEmpty else {
+            throw AppWLocCoordinateInputError.missingLongitude
+        }
+        guard let latitude = Double(latitudeText), latitude.isFinite, (-90...90).contains(latitude) else {
+            throw AppWLocCoordinateInputError.invalidLatitude
+        }
+        guard let longitude = Double(longitudeText), longitude.isFinite, (-180...180).contains(longitude) else {
+            throw AppWLocCoordinateInputError.invalidLongitude
+        }
+
+        let sourceCoordinate = CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
+        let coordinate = appleMapCoordinate(from: sourceCoordinate, sourceSystem: sourceSystem)
+        guard coordinate.latitude.isFinite,
+              coordinate.longitude.isFinite,
+              CLLocationCoordinate2DIsValid(coordinate) else {
+            throw AppWLocCoordinateInputError.conversionFailed
+        }
+        return coordinate
+    }
+
     static func isInMainlandChina(_ coordinate: CLLocationCoordinate2D) -> Bool {
         let latitude = coordinate.latitude
         let longitude = coordinate.longitude

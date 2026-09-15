@@ -52,6 +52,7 @@ class AppWLocUtils {
         
         let line = "[\(str)] \(message)\n"
         NSLog("%@", message)
+        print("\(message)")
 
         debugLogQueue.async {
             appendDebugLogLine(line)

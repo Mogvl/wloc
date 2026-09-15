@@ -127,6 +127,7 @@ final class WLocMacMapViewController: NSViewController {
     private let coordinateLabel = NSTextField.wlocLabel("")
     private let lockButton = NSButton.wlocButton("锁定位置")
     private let favoriteButton = NSButton.wlocButton("加入收藏")
+    private let coordinateInputButton = NSButton.wlocButton("经纬度选点")
     private let tutorialButton = NSButton.wlocButton("教程与证书")
     private let telegramButton = WLocMacLinkButton(
         title: "Telegram",
@@ -267,7 +268,7 @@ final class WLocMacMapViewController: NSViewController {
         favoriteMenu.addItem(deleteItem)
         favoritesTable.menu = favoriteMenu
 
-        [lockButton, favoriteButton, tutorialButton, telegramButton, githubButton].forEach {
+        [lockButton, favoriteButton, coordinateInputButton, tutorialButton, telegramButton, githubButton].forEach {
             $0.bezelStyle = .rounded
             $0.controlSize = .regular
         }
@@ -288,6 +289,8 @@ final class WLocMacMapViewController: NSViewController {
         lockButton.action = #selector(lockCurrentPlace)
         favoriteButton.target = self
         favoriteButton.action = #selector(addFavorite)
+        coordinateInputButton.target = self
+        coordinateInputButton.action = #selector(openCoordinateInput)
         tutorialButton.target = self
         tutorialButton.action = #selector(openTutorial)
         telegramButton.target = self
@@ -380,7 +383,7 @@ final class WLocMacMapViewController: NSViewController {
         favoritesScroll.hasVerticalScroller = true
         favoritesScroll.borderType = .noBorder
 
-        let actionStack = NSStackView(views: [lockButton, favoriteButton])
+        let actionStack = NSStackView(views: [lockButton, favoriteButton, coordinateInputButton])
         actionStack.orientation = .horizontal
         actionStack.spacing = 10
         actionStack.distribution = .fillEqually
@@ -400,7 +403,7 @@ final class WLocMacMapViewController: NSViewController {
             make.width.equalTo(secondaryActionStack).offset(-36)
         }
 
-        [lockButton, favoriteButton, tutorialButton, telegramButton, githubButton].forEach { button in
+        [lockButton, favoriteButton, coordinateInputButton, tutorialButton, telegramButton, githubButton].forEach { button in
             button.snp.makeConstraints { make in
                 make.height.equalTo(36)
             }
@@ -550,6 +553,67 @@ final class WLocMacMapViewController: NSViewController {
         reverseGeocodeWorkItem = workItem
         AppWLocUtils.mainThreadAfter(0.45) {
             workItem.perform()
+        }
+    }
+
+    @objc private func openCoordinateInput() {
+        let sourceSystems = AppWLocCoordinateSystem.allCases
+        let sourcePopup = NSPopUpButton(frame: NSRect(x: 72, y: 88, width: 288, height: 26), pullsDown: false)
+        sourcePopup.addItems(withTitles: sourceSystems.map(\.inputTitle))
+
+        let latitudeField = NSTextField(frame: NSRect(x: 72, y: 48, width: 288, height: 26))
+        latitudeField.placeholderString = "例如 39.9087"
+        let longitudeField = NSTextField(frame: NSRect(x: 72, y: 8, width: 288, height: 26))
+        longitudeField.placeholderString = "例如 116.3975"
+
+        let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 122))
+        let sourceLabel = NSTextField.wlocLabel("坐标来源")
+        sourceLabel.frame = NSRect(x: 0, y: 93, width: 68, height: 20)
+        let latitudeLabel = NSTextField.wlocLabel("纬度")
+        latitudeLabel.frame = NSRect(x: 0, y: 53, width: 68, height: 20)
+        let longitudeLabel = NSTextField.wlocLabel("经度")
+        longitudeLabel.frame = NSRect(x: 0, y: 13, width: 68, height: 20)
+        [sourceLabel, latitudeLabel, longitudeLabel, sourcePopup, latitudeField, longitudeField].forEach {
+            accessoryView.addSubview($0)
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "输入经纬度"
+        alert.informativeText = "将按选择的坐标系转换后，在 Apple 地图上选中位置。"
+        alert.accessoryView = accessoryView
+        alert.addButton(withTitle: "在地图上定位")
+        alert.addButton(withTitle: "取消")
+
+        guard let window = view.window else { return }
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn,
+                  let self,
+                  sourceSystems.indices.contains(sourcePopup.indexOfSelectedItem) else { return }
+            self.applyCoordinateInput(
+                latitudeText: latitudeField.stringValue,
+                longitudeText: longitudeField.stringValue,
+                sourceSystem: sourceSystems[sourcePopup.indexOfSelectedItem]
+            )
+        }
+    }
+
+    private func applyCoordinateInput(
+        latitudeText: String,
+        longitudeText: String,
+        sourceSystem: AppWLocCoordinateSystem
+    ) {
+        do {
+            let coordinate = try AppWLocCoordinateTool.appleMapCoordinate(
+                latitudeText: latitudeText,
+                longitudeText: longitudeText,
+                sourceSystem: sourceSystem
+            )
+            hideSearchResults()
+            view.window?.makeFirstResponder(nil)
+            mapView.setCenter(coordinate, animated: true)
+            selectCoordinate(coordinate, name: "经纬度位置")
+        } catch {
+            showAlert(title: "坐标无效", message: error.localizedDescription)
         }
     }
 

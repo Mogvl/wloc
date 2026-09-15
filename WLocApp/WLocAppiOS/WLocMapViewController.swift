@@ -28,6 +28,7 @@ final class WLocMapViewController: UIViewController {
     private let lockButton = WLocGlassButton(title: "锁定位置", style: .primary)
     private let favoriteButton = WLocGlassButton(title: "收藏", style: .secondary)
     private let favoritesButton = WLocGlassButton(title: "收藏夹", style: .secondary)
+    private let coordinateInputButton = WLocGlassButton(title: "经纬度", style: .secondary)
     private let tutorialButton = WLocGlassButton(title: "教程", style: .required)
     private let telegramButton = WLocGlassButton(title: "Telegram", style: .secondary)
     private let websiteButton = WLocGlassButton(title: "Github", style: .secondary)
@@ -133,6 +134,7 @@ final class WLocMapViewController: UIViewController {
         lockButton.addTarget(self, action: #selector(lockCurrentPlace), for: .touchUpInside)
         favoriteButton.addTarget(self, action: #selector(addFavorite), for: .touchUpInside)
         favoritesButton.addTarget(self, action: #selector(openFavorites), for: .touchUpInside)
+        coordinateInputButton.addTarget(self, action: #selector(openCoordinateInput), for: .touchUpInside)
         tutorialButton.addTarget(self, action: #selector(openTutorial), for: .touchUpInside)
         configureExternalLinkButton(
             telegramButton,
@@ -230,7 +232,7 @@ final class WLocMapViewController: UIViewController {
             make.bottom.equalTo(view.safeAreaLayoutGuide)
         }
 
-        let secondaryRow = UIStackView(arrangedSubviews: [favoriteButton, favoritesButton, tutorialButton])
+        let secondaryRow = UIStackView(arrangedSubviews: [favoriteButton, favoritesButton, coordinateInputButton, tutorialButton])
         secondaryRow.axis = .horizontal
         secondaryRow.spacing = 10
         secondaryRow.distribution = .fillEqually
@@ -456,6 +458,76 @@ final class WLocMapViewController: UIViewController {
     @objc private func closeSearchResults() {
         view.endEditing(true)
         resultsGlass.isHidden = true
+    }
+
+    @objc private func openCoordinateInput() {
+        view.endEditing(true)
+        let sheet = UIAlertController(title: "选择坐标来源", message: nil, preferredStyle: .actionSheet)
+        AppWLocCoordinateSystem.allCases.forEach { system in
+            sheet.addAction(UIAlertAction(title: system.inputTitle, style: .default) { [weak self] _ in
+                self?.showCoordinateInput(for: system)
+            })
+        }
+        sheet.addAction(UIAlertAction(title: "取消", style: .cancel))
+        sheet.popoverPresentationController?.sourceView = coordinateInputButton
+        sheet.popoverPresentationController?.sourceRect = coordinateInputButton.bounds
+        present(sheet, animated: true)
+    }
+
+    private func showCoordinateInput(for sourceSystem: AppWLocCoordinateSystem) {
+        let alert = UIAlertController(
+            title: "输入经纬度",
+            message: "坐标来源：\(sourceSystem.inputTitle)",
+            preferredStyle: .alert
+        )
+        alert.addTextField { textField in
+            textField.placeholder = "纬度，例如 39.9087"
+            textField.keyboardType = .numbersAndPunctuation
+            textField.autocorrectionType = .no
+            textField.spellCheckingType = .no
+        }
+        alert.addTextField { textField in
+            textField.placeholder = "经度，例如 116.3975"
+            textField.keyboardType = .numbersAndPunctuation
+            textField.autocorrectionType = .no
+            textField.spellCheckingType = .no
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
+        alert.addAction(UIAlertAction(title: "在地图上定位", style: .default) { [weak self, weak alert] _ in
+            guard let self = self, let fields = alert?.textFields, fields.count == 2 else { return }
+            self.applyCoordinateInput(
+                latitudeText: fields[0].text ?? "",
+                longitudeText: fields[1].text ?? "",
+                sourceSystem: sourceSystem
+            )
+        })
+        present(alert, animated: true)
+    }
+
+    private func applyCoordinateInput(
+        latitudeText: String,
+        longitudeText: String,
+        sourceSystem: AppWLocCoordinateSystem
+    ) {
+        do {
+            let coordinate = try AppWLocCoordinateTool.appleMapCoordinate(
+                latitudeText: latitudeText,
+                longitudeText: longitudeText,
+                sourceSystem: sourceSystem
+            )
+            closeSearchResults()
+            let place = AppWLocPlace(
+                name: "经纬度位置",
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            )
+            selectPlace(place, shouldReverseGeocode: true, moveMap: true, animated: false, avoidingResults: false)
+        } catch {
+            let message = error.localizedDescription
+            AppWLocUtils.mainThreadAfter(0.2) { [weak self] in
+                self?.showMessage("坐标无效", message)
+            }
+        }
     }
 
     @objc private func locateCurrentPosition() {
