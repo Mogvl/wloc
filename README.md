@@ -8,7 +8,7 @@
 <h4>
 
 
-<p>网页定位支持iOS27.0，在线体验：<a href="https://wloc8.com/" target="_blank">https://wloc8.com/</a>，TG群：https://t.me/wloc88</p>
+<p>网页定位支持到iOS27.0 beta5， 27.0 beta6以后的版本由于苹果封堵暂不能使用，在线体验：<a href="https://wloc8.com/" target="_blank">https://wloc8.com/</a>，TG群：https://t.me/wloc88</p>
 如您有Mac电脑，请加入群聊进行兼容性测试：https://t.me/wloc88</h4>
 
 ## 项目介绍
