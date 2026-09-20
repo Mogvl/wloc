@@ -89,11 +89,9 @@ final class AppWLocPACManager {
         try ensureHelper()
 
         let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey: savedSettingsKey),
-           let staleSettings = try? JSONDecoder().decode([String: SavedPACSetting].self, from: data),
-           !staleSettings.isEmpty {
-            restorePAC(staleSettings)
-            defaults.removeObject(forKey: savedSettingsKey)
+        try loadSavedSettings()
+        if let error = restorePAC(previousSettings) {
+            throw error
         }
 
         let services = try activeNetworkServices()
@@ -153,12 +151,11 @@ final class AppWLocPACManager {
     @discardableResult
     private func stop() -> Error? {
         var restoreError: Error?
-        if !previousSettings.isEmpty {
+        do {
+            try loadSavedSettings()
             restoreError = restorePAC(previousSettings)
-            previousSettings.removeAll()
-            if restoreError == nil {
-                UserDefaults.standard.removeObject(forKey: savedSettingsKey)
-            }
+        } catch {
+            restoreError = error
         }
         if pacServer.isRunning { pacServer.stop() }
         proxyServer.stop()
@@ -167,9 +164,17 @@ final class AppWLocPACManager {
         return restoreError
     }
 
+    private func loadSavedSettings() throws {
+        guard previousSettings.isEmpty,
+              let data = UserDefaults.standard.data(forKey: savedSettingsKey) else { return }
+        previousSettings = try JSONDecoder().decode([String: SavedPACSetting].self, from: data)
+    }
+
     @discardableResult
     private func restorePAC(_ settings: [String: SavedPACSetting]) -> Error? {
-        var restoreError: Error?
+        guard !settings.isEmpty else { return nil }
+        var failures: [String] = []
+        var remaining = settings
         for (service, setting) in settings {
             do {
                 try setPAC([AppWLocPACNetworkSetting(
@@ -177,12 +182,22 @@ final class AppWLocPACManager {
                     url: setting.url,
                     enabled: setting.enabled
                 )])
+                remaining.removeValue(forKey: service)
             } catch {
-                restoreError = error
-                AppWLocUtils.debugLog("PAC 忽略无法恢复的网络服务 \(service)：\(error.localizedDescription)")
+                failures.append("\(service)：\(error.localizedDescription)")
             }
         }
-        return restoreError
+        previousSettings = remaining
+        if remaining.isEmpty {
+            UserDefaults.standard.removeObject(forKey: savedSettingsKey)
+        } else {
+            do {
+                UserDefaults.standard.set(try JSONEncoder().encode(remaining), forKey: savedSettingsKey)
+            } catch {
+                return error
+            }
+        }
+        return failures.isEmpty ? nil : AppWLocPACError.commandFailed(failures.sorted().joined(separator: "\n"))
     }
 
     private func ensureHelper() throws {
