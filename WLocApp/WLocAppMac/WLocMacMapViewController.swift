@@ -90,16 +90,16 @@ private final class WLocMacLinkButton: NSButton {
     }
 
     private func updateAppearance() {
-        let alpha: CGFloat = isPointerInside ? 0.92 : 0.78
+        let alpha: CGFloat = isPointerInside ? 0.14 : 0.04
         layer?.backgroundColor = baseColor.withAlphaComponent(alpha).cgColor
         attributedTitle = NSAttributedString(
             string: title,
             attributes: [
-                .foregroundColor: NSColor.white,
+                .foregroundColor: NSColor.secondaryLabelColor,
                 .font: NSFont.systemFont(ofSize: 13, weight: .semibold)
             ]
         )
-        contentTintColor = .white
+        contentTintColor = .secondaryLabelColor
     }
 }
 
@@ -126,6 +126,7 @@ final class WLocMacMapViewController: NSViewController {
     private let detailLabel = NSTextField.wlocLabel("")
     private let coordinateLabel = NSTextField.wlocLabel("")
     private let lockButton = NSButton.wlocButton("锁定位置")
+    private let restoreButton = NSButton.wlocButton("恢复定位")
     private let favoriteButton = NSButton.wlocButton("加入收藏")
     private let coordinateInputButton = NSButton.wlocButton("经纬度选点")
     private let tutorialButton = NSButton.wlocButton("教程与证书")
@@ -156,8 +157,11 @@ final class WLocMacMapViewController: NSViewController {
     private var availableUpdate: AppWLocAvailableUpdate?
     private var shouldSelectNextLocationUpdate = false
     private var isRefreshingLocationAfterLock = false
+    private var isChangingLocation = false
+    private var locationRefreshWorkItem: DispatchWorkItem?
 
     deinit {
+        locationRefreshWorkItem?.cancel()
         if let outsideSearchClickMonitor {
             NSEvent.removeMonitor(outsideSearchClickMonitor)
         }
@@ -268,7 +272,7 @@ final class WLocMacMapViewController: NSViewController {
         favoriteMenu.addItem(deleteItem)
         favoritesTable.menu = favoriteMenu
 
-        [lockButton, favoriteButton, coordinateInputButton, tutorialButton, telegramButton, githubButton].forEach {
+        [lockButton, restoreButton, favoriteButton, coordinateInputButton, tutorialButton, telegramButton, githubButton].forEach {
             $0.bezelStyle = .rounded
             $0.controlSize = .regular
         }
@@ -285,6 +289,8 @@ final class WLocMacMapViewController: NSViewController {
             button.font = .systemFont(ofSize: 18, weight: .semibold)
         }
 
+        restoreButton.target = self
+        restoreButton.action = #selector(restoreLocation)
         lockButton.target = self
         lockButton.action = #selector(lockCurrentPlace)
         favoriteButton.target = self
@@ -383,12 +389,18 @@ final class WLocMacMapViewController: NSViewController {
         favoritesScroll.hasVerticalScroller = true
         favoritesScroll.borderType = .noBorder
 
-        let actionStack = NSStackView(views: [lockButton, favoriteButton, coordinateInputButton])
+        let actionStack = NSStackView(views: [lockButton, restoreButton])
         actionStack.orientation = .horizontal
         actionStack.spacing = 10
         actionStack.distribution = .fillEqually
 
-        let secondaryActionStack = NSStackView(views: [tutorialButton])
+        lockButton.bezelColor = .controlAccentColor
+        let selectionStack = NSStackView(views: [favoriteButton, coordinateInputButton])
+        selectionStack.orientation = .horizontal
+        selectionStack.spacing = 10
+        selectionStack.distribution = .fillEqually
+
+        let secondaryActionStack = NSStackView(views: [selectionStack, tutorialButton])
         secondaryActionStack.orientation = .vertical
         secondaryActionStack.spacing = 15
         secondaryActionStack.distribution = .fillEqually
@@ -397,19 +409,17 @@ final class WLocMacMapViewController: NSViewController {
         externalLinkStack.orientation = .horizontal
         externalLinkStack.spacing = 10
         externalLinkStack.distribution = .fillEqually
-        secondaryActionStack.addArrangedSubview(externalLinkStack)
-
-        externalLinkStack.snp.makeConstraints { make in
-            make.width.equalTo(secondaryActionStack).offset(-36)
+        selectionStack.snp.makeConstraints { make in
+            make.width.equalTo(secondaryActionStack)
         }
 
-        [lockButton, favoriteButton, coordinateInputButton, tutorialButton, telegramButton, githubButton].forEach { button in
+        [lockButton, restoreButton, favoriteButton, coordinateInputButton, tutorialButton, telegramButton, githubButton].forEach { button in
             button.snp.makeConstraints { make in
                 make.height.equalTo(36)
             }
         }
 
-        [appNameLabel, versionLabel, updateButton, searchField, titleLabel, detailLabel, coordinateLabel, actionStack, secondaryActionStack, favoriteTitle, favoritesScroll].forEach {
+        [appNameLabel, versionLabel, updateButton, searchField, titleLabel, detailLabel, coordinateLabel, actionStack, secondaryActionStack, favoriteTitle, favoritesScroll, externalLinkStack].forEach {
             sidebar.contentView.addSubview($0)
         }
 
@@ -450,7 +460,7 @@ final class WLocMacMapViewController: NSViewController {
         }
         secondaryActionStack.snp.makeConstraints { make in
             make.top.equalTo(actionStack.snp.bottom).offset(10)
-            make.leading.trailing.equalToSuperview()
+            make.leading.trailing.equalTo(searchField)
         }
         favoriteTitle.snp.makeConstraints { make in
             make.top.equalTo(secondaryActionStack.snp.bottom).offset(20)
@@ -459,7 +469,11 @@ final class WLocMacMapViewController: NSViewController {
         favoritesScroll.snp.makeConstraints { make in
             make.top.equalTo(favoriteTitle.snp.bottom).offset(8)
             make.leading.trailing.equalTo(searchField)
-            make.bottom.equalToSuperview().inset(16)
+            make.bottom.equalTo(externalLinkStack.snp.top).offset(-12)
+        }
+        externalLinkStack.snp.makeConstraints { make in
+            make.leading.trailing.equalTo(searchField)
+            make.bottom.equalToSuperview().inset(12)
         }
 
         searchResultsPanel.snp.makeConstraints { make in
@@ -672,23 +686,58 @@ final class WLocMacMapViewController: NSViewController {
     }
 
     private func lock(_ place: AppWLocPlace, successMessage: String) {
+        guard !isChangingLocation else { return }
+        isChangingLocation = true
+        locationRefreshWorkItem?.cancel()
+        restoreButton.isEnabled = false
         lockButton.isEnabled = false
         lockButton.title = "锁定中..."
         pacManager.lock(to: place) { [weak self] result in
             AppWLocUtils.mainThread {
                 guard let self else { return }
+                self.isChangingLocation = false
+                self.restoreButton.isEnabled = true
                 self.lockButton.isEnabled = true
                 switch result {
                 case .success:
                     self.lockButton.title = "锁定位置"
-                    AppWLocUtils.mainThreadAfter(2.0) { [weak self] in
+                    let refresh = DispatchWorkItem { [weak self] in
                         self?.startSystemLocationRefresh(selectResult: false)
                     }
+                    self.locationRefreshWorkItem = refresh
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: refresh)
                     self.showAlert(title: "已锁定", message: successMessage)
                 case .failure(let error):
                     self.lockButton.title = "锁定位置"
                     self.showAlert(title: "启动失败", message: error.localizedDescription)
                 }
+            }
+        }
+    }
+
+    @objc private func restoreLocation() {
+        guard !isChangingLocation else { return }
+        isChangingLocation = true
+        locationRefreshWorkItem?.cancel()
+        locationRefreshWorkItem = nil
+        shouldSelectNextLocationUpdate = false
+        isRefreshingLocationAfterLock = false
+        locationManager.stopUpdatingLocation()
+        restoreButton.isEnabled = false
+        lockButton.isEnabled = false
+        restoreButton.title = "恢复中…"
+
+        pacManager.stop(clearState: true) { [weak self] error in
+            guard let self else { return }
+            self.isChangingLocation = false
+            self.restoreButton.isEnabled = true
+            self.lockButton.isEnabled = true
+            if let error {
+                self.restoreButton.title = "重试恢复"
+                self.showAlert(title: "恢复失败", message: "原代理设置尚未全部恢复，请重试。\n\n\(error.localizedDescription)")
+            } else {
+                self.restoreButton.title = "恢复定位"
+                self.showAlert(title: "已停止修改定位", message: "已恢复原代理设置。请关闭系统定位服务，等待两秒后重新开启，以刷新实际位置。")
             }
         }
     }
@@ -712,6 +761,7 @@ final class WLocMacMapViewController: NSViewController {
     }
 
     private func applyExternalLocation(_ place: AppWLocPlace) {
+        guard !isChangingLocation else { return }
         view.window?.makeFirstResponder(nil)
         reverseGeocodeWorkItem?.cancel()
         geocoder.cancelGeocode()
@@ -933,6 +983,7 @@ final class WLocMacMapViewController: NSViewController {
     }
 
     private func startSystemLocationRefresh(selectResult: Bool) {
+        guard !isChangingLocation else { return }
         shouldSelectNextLocationUpdate = selectResult
         isRefreshingLocationAfterLock = !selectResult
         mapView.showsUserLocation = true
@@ -962,6 +1013,7 @@ final class WLocMacMapViewController: NSViewController {
     }
 
     private func handleLocationAuthorizationChange(_ status: CLAuthorizationStatus) {
+        guard !isChangingLocation else { return }
         let hasLockedState = AppWLocStateStore.shared.load() != nil
         AppWLocUtils.debugLog(
             "\(AppWLocConfig.displayName) macOS 定位授权变化 status=\(authorizationStatusDescription(status))，afterLock=\(isRefreshingLocationAfterLock)，selectNext=\(shouldSelectNextLocationUpdate)，locked=\(hasLockedState)"
@@ -1148,6 +1200,7 @@ extension WLocMacMapViewController: CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
+        guard !isChangingLocation else { return }
         guard let location = locations.last else { return }
         manager.stopUpdatingLocation()
         AppWLocUtils.debugLog(
@@ -1162,6 +1215,7 @@ extension WLocMacMapViewController: CLLocationManagerDelegate {
     }
 
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        guard !isChangingLocation else { return }
         manager.stopUpdatingLocation()
         AppWLocUtils.debugLog("\(AppWLocConfig.displayName) macOS 定位刷新失败：\(error.localizedDescription)")
         let shouldShowError = shouldSelectNextLocationUpdate || !isRefreshingLocationAfterLock
