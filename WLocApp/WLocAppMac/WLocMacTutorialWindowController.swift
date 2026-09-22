@@ -81,7 +81,7 @@ final class WLocMacTutorialViewController: NSViewController {
 
         addTitle("二、锁定位置")
         addStep("1. 在主界面搜索地点，或拖动地图到目标位置。")
-        addStep("2. 点击“锁定位置”，系统会自动添加或启动 \(AppWLocConfig.displayName) VPN。")
+        addStep("2. 点击“锁定位置”，应用会启用本地定位代理，并配置系统 PAC。")
         addStep("3. 打开系统定位服务，关闭后等待两秒再打开。")
 
         let line = NSView()
@@ -91,7 +91,7 @@ final class WLocMacTutorialViewController: NSViewController {
         }
 
         addTitle("三、恢复原始位置")
-        addStep("1. 退出应用会自动断开 \(AppWLocConfig.displayName) VPN。")
+        addStep("1. 点击主界面的“恢复定位”恢复原代理设置；若提示失败，请点击“重试恢复”。退出应用也会尝试恢复。")
         addStep("2. 再次关开定位服务。如未恢复，重启电脑后再试。")
     }
 
