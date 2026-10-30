@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
-
+        AppWLocUtils.logMacEnvironment(reason: "应用启动")
         NSApp.setActivationPolicy(.regular)
         showMainWindow()
 
@@ -133,6 +133,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mapController?.openTutorial()
     }
 
+    /// 帮助菜单始终保留日志入口，主窗口关闭后也可以打开。
+    @objc private func showDebugLog() {
+        showMainWindow()
+        mapController?.openDebugLog()
+    }
+
     @objc private func openGitHub() {
         NSWorkspace.shared.open(AppWLocConfig.githubRepositoryURL)
     }
@@ -195,6 +201,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let helpMenu = addMenu("帮助", to: mainMenu)
         helpMenu.addItem(menuItem("教程与证书", action: #selector(showTutorial)))
+        helpMenu.addItem(menuItem("查看日志…", action: #selector(showDebugLog)))
         helpMenu.addItem(menuItem("检查更新…", action: #selector(checkForUpdates)))
         helpMenu.addItem(.separator())
         helpMenu.addItem(menuItem("在 GitHub 上查看", action: #selector(openGitHub)))

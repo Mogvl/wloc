@@ -1,5 +1,8 @@
 import Foundation
 import Security
+#if os(macOS)
+import CryptoKit
+#endif
 
 enum AppWLocCertificateError: Error, LocalizedError {
     case containerUnavailable
@@ -95,6 +98,40 @@ final class AppWLocCertificateStore {
     }
 
     #if os(macOS)
+    /// 只检查公开证书信息和当前进程的系统信任，不导出私钥或改变信任设置。
+    func logMacCertificateDiagnostics() {
+        do {
+            let chain = try loadProxyTLSCertificateChain()
+            guard let identity = chain.first else { throw AppWLocCertificateError.identityNotFound }
+            var leaf: SecCertificate?
+            let status = SecIdentityCopyCertificate(identity as! SecIdentity, &leaf)
+            guard status == errSecSuccess, let leaf else {
+                throw AppWLocCertificateError.importFailed(status)
+            }
+            let certificates: [Any] = [leaf] + Array(chain.dropFirst())
+            for (index, item) in certificates.enumerated() {
+                let certificate = item as! SecCertificate
+                let data = SecCertificateCopyData(certificate) as Data
+                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                AppWLocUtils.debugLog("TLS 证书[\(index)]：\(SecCertificateCopySubjectSummary(certificate) as String? ?? "未知")，SHA256=\(digest)")
+            }
+            for host in AppWLocConfig.appWLocHosts.sorted() {
+                var trust: SecTrust?
+                let result = SecTrustCreateWithCertificates(certificates as CFArray, SecPolicyCreateSSL(true, host as CFString), &trust)
+                guard result == errSecSuccess, let trust else {
+                    AppWLocUtils.debugLog("证书信任检查创建失败：host=\(host)，OSStatus=\(result)")
+                    continue
+                }
+                SecTrustSetNetworkFetchAllowed(trust, false)
+                var error: CFError?
+                let trusted = SecTrustEvaluateWithError(trust, &error)
+                AppWLocUtils.debugLog("证书系统信任检查（当前应用进程）：host=\(host)，trusted=\(trusted)，error=\(String(describing: error))；客户端是否接受证书以实际 TLS 结果为准")
+            }
+        } catch {
+            AppWLocUtils.debugLog("代理证书诊断失败：\(error as NSError)")
+        }
+    }
+
     func loadProxyTLSCertificateChain() throws -> [Any] {
         let items: [[String: Any]]
         if let url = identityFileURL,

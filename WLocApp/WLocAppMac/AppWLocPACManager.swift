@@ -2,6 +2,7 @@ import Foundation
 import GCDWebServer
 import ServiceManagement
 import CryptoKit
+import CFNetwork
 
 enum AppWLocPACError: Error, LocalizedError {
     case noNetworkService
@@ -52,8 +53,27 @@ final class AppWLocPACManager {
     private var fallbackPACReturn = "DIRECT"
     private var isRunning = false
 
+    /// 只读取当前环境，不启动 Helper，也不修改系统代理。
+    func logDiagnostics(completion: @escaping () -> Void) {
+        queue.async {
+            AppWLocUtils.logMacEnvironment(reason: "查看当前诊断状态")
+            self.logProxySettings()
+            AppWLocCertificateStore.shared.logMacCertificateDiagnostics()
+            DispatchQueue.main.async(execute: completion)
+        }
+    }
+
+    /// 记录系统实际使用的代理，便于发现 PAC 被 VPN 或其他软件覆盖。
+    private func logProxySettings() {
+        let settings = CFNetworkCopySystemProxySettings()?.takeRetainedValue()
+        let helper = SMAppService.daemon(plistName: AppWLocPrivilegedHelperConstants.launchDaemonPlistName)
+        AppWLocUtils.debugLog("PAC 状态：running=\(isRunning)，PAC服务=\(pacServer.isRunning)，端口=\(pacServer.port)，Helper状态=\(helper.status.rawValue)\n系统代理：\(String(describing: settings))")
+    }
+
     /// 保存本次选择的坐标和定位参数，代理已启动时也会更新锁定状态。
     func lock(to place: AppWLocPlace, parameters: AppWLocLockParameters = AppWLocLockParameters(), completion: @escaping (Result<Void, Error>) -> Void) {
+        AppWLocUtils.logMacEnvironment(reason: "开始锁定位置")
+        AppWLocUtils.debugLog("地图坐标：lat=\(place.latitude)，lng=\(place.longitude)，海拔=\(parameters.altitude)，水平精度=\(parameters.horizontalAccuracy)，垂直精度=\(parameters.verticalAccuracy)")
         do {
             let coordinate = AppWLocCoordinateTool.wlocResponseCoordinate(fromAppleMapCoordinate: place.coordinate)
             try AppWLocStateStore.shared.lock(
@@ -64,12 +84,15 @@ final class AppWLocPACManager {
                 verticalAccuracy: parameters.verticalAccuracy
             )
         } catch {
+            AppWLocUtils.debugLog("保存锁定位置失败：\(error as NSError)")
             completion(.failure(error))
             return
         }
 
         queue.async {
             if self.isRunning {
+                AppWLocUtils.debugLog("PAC 已在运行，本次更新锁定坐标")
+                self.logProxySettings()
                 DispatchQueue.main.async { completion(.success(())) }
                 return
             }
@@ -85,6 +108,7 @@ final class AppWLocPACManager {
         }
     }
 
+    /// 恢复系统代理，并按用户操作决定是否清除锁定坐标。
     func stop(clearState: Bool = false, completion: ((Error?) -> Void)? = nil) {
         queue.async {
             let error = self.stop()
@@ -95,6 +119,7 @@ final class AppWLocPACManager {
         }
     }
 
+    /// 退出前等待原代理恢复完成。
     func stopForAppTermination() {
         queue.sync {
             _ = stop()
@@ -104,6 +129,8 @@ final class AppWLocPACManager {
 
     /// 保存原代理设置，启动本地服务，并确认实际监听地址有效后再启用系统 PAC。
     private func start() throws {
+        logProxySettings()
+        AppWLocCertificateStore.shared.logMacCertificateDiagnostics()
         try ensureHelper()
 
         let defaults = UserDefaults.standard
@@ -144,8 +171,10 @@ final class AppWLocPACManager {
                 return "\(fallbackPACReturn)";
             }
             """
-            pacServer.addHandler(forMethod: "GET", path: AppWLocConfig.pacPath, request: GCDWebServerRequest.self) { _ in
-                GCDWebServerDataResponse(
+            AppWLocUtils.debugLog("PAC 脚本：\n\(script)")
+            pacServer.addHandler(forMethod: "GET", path: AppWLocConfig.pacPath, request: GCDWebServerRequest.self) { request in
+                AppWLocUtils.debugLog("PAC 脚本被读取：\(request.url.absoluteString)，请求头：\(request.headers)")
+                return GCDWebServerDataResponse(
                     data: Data(script.utf8),
                     contentType: "application/x-ns-proxy-autoconfig"
                 )
@@ -171,12 +200,14 @@ final class AppWLocPACManager {
             })
             isRunning = true
             AppWLocUtils.debugLog("\(AppWLocConfig.displayName) PAC 已启用：\(pacURL.absoluteString)")
+            logProxySettings()
         } catch {
             _ = stop()
             throw error
         }
     }
 
+    /// 先还原代理再关闭本地服务，记录未能恢复的具体错误。
     @discardableResult
     private func stop() -> Error? {
         var restoreError: Error?
@@ -190,6 +221,8 @@ final class AppWLocPACManager {
         proxyServer.stop()
         fallbackPACReturn = "DIRECT"
         isRunning = false
+        AppWLocUtils.debugLog("PAC 已停止，恢复原设置结果：\(restoreError.map { String(describing: $0 as NSError) } ?? "成功")")
+        logProxySettings()
         return restoreError
     }
 
@@ -231,6 +264,7 @@ final class AppWLocPACManager {
         return failures.isEmpty ? nil : AppWLocPACError.commandFailed(failures.sorted().joined(separator: "\n"))
     }
 
+    /// 记录 Helper 注册和启动状态，区分权限、安装位置和连接故障。
     private func ensureHelper() throws {
         let service = SMAppService.daemon(plistName: AppWLocPrivilegedHelperConstants.launchDaemonPlistName)
         let defaults = UserDefaults.standard
@@ -245,6 +279,7 @@ final class AppWLocPACManager {
         registrationData.append(daemonData)
         let signature = SHA256.hash(data: registrationData).map { String(format: "%02x", $0) }.joined()
         let helperLoaded = isHelperLoaded()
+        AppWLocUtils.debugLog("Helper 检查：status=\(service.status.rawValue)，loaded=\(helperLoaded)，文件=\(helperURL.path)，签名摘要=\(signature)")
         
         var shouldRegister = service.status == .notRegistered || service.status == .notFound
 
@@ -261,6 +296,7 @@ final class AppWLocPACManager {
         let status = waitForHelperStatus(service, timeout: 2) { status in
             status == .enabled || status == .requiresApproval
         }
+        AppWLocUtils.debugLog("Helper 注册后状态：\(status.rawValue)")
 
         switch status {
         case .enabled:
@@ -416,6 +452,8 @@ final class AppWLocPACManager {
     private func setPAC(_ settings: [AppWLocPACNetworkSetting]) throws {
         guard !settings.isEmpty else { return }
         let settings = try settings.map { try $0.validated() }
+        let payload = try JSONEncoder().encode(settings)
+        AppWLocUtils.debugLog("通过 Helper 设置 PAC：\(String(decoding: payload, as: UTF8.self))")
         let connection = NSXPCConnection(
             machServiceName: AppWLocPrivilegedHelperConstants.machServiceName,
             options: .privileged
@@ -442,7 +480,7 @@ final class AppWLocPACManager {
             connection.invalidate()
             throw AppWLocPACError.helperFailed("")
         }
-        helper.applyPACSettings(try JSONEncoder().encode(settings), withReply: finish)
+        helper.applyPACSettings(payload, withReply: finish)
 
         guard semaphore.wait(timeout: .now() + 15) == .success else {
             connection.invalidate()
@@ -450,8 +488,10 @@ final class AppWLocPACManager {
         }
         connection.invalidate()
         if let message = result {
+            AppWLocUtils.debugLog("Helper 设置 PAC 失败：\(message)")
             throw AppWLocPACError.commandFailed(message)
         }
+        AppWLocUtils.debugLog("Helper 设置 PAC 完成")
     }
 
     private func activeNetworkServices() throws -> [String] {
@@ -512,6 +552,7 @@ final class AppWLocPACManager {
         return "\(type) \(host):\(port)"
     }
 
+    /// 保留网络配置命令的实际输出，轮询 launchctl 时避免重复刷屏。
     private func run(_ executable: String, _ arguments: [String]) throws -> String {
         let process = Process()
         let output = Pipe()
@@ -528,6 +569,9 @@ final class AppWLocPACManager {
         process.waitUntilExit()
         let text = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if executable == "/usr/sbin/networksetup" {
+            AppWLocUtils.debugLog("执行 \(executable) \(arguments.joined(separator: " "))，exit=\(process.terminationStatus)\n\(text)")
+        }
         guard process.terminationStatus == 0 else {
             throw AppWLocPACError.commandFailed(text)
         }

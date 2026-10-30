@@ -133,18 +133,28 @@ final class AppWLocHTTPProxyServer {
         }
     }
 
+    /// 每次连接分配编号，失败时记录停在哪个阶段和已经耗费的时间。
     private func handleClient(_ clientFD: Int32) {
+        let connectionID = String(UUID().uuidString.prefix(8))
+        let started = Date()
+        var stage = "读取 CONNECT"
+        var targetDescription = "未知"
         configureTimeouts(clientFD)
 
         do {
             let connectRequest = try readProxyHeader(from: clientFD)
+            #if os(macOS)
+            AppWLocUtils.debugLog("[连接 \(connectionID)] 收到 CONNECT，fd=\(clientFD)\n\(connectRequest)")
+            #endif
             let target = try parseConnectTarget(connectRequest)
-            AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 本地代理 CONNECT \(target.host):\(target.port)")
+            targetDescription = "\(target.host):\(target.port)"
+            AppWLocUtils.debugLog("[连接 \(connectionID)] 本地代理 CONNECT \(targetDescription)")
             guard AppWLocConfig.appWLocHosts.contains(target.host) else {
                 throw AppWLocProxyError.unsupportedHost(target.host)
             }
 
             #if os(macOS)
+            stage = "加载服务端证书链"
             let tlsCertificates: [Any]
             do {
                 // locationd 的 TLS 校验不会替代理补齐签发链。macOS 必须发送
@@ -154,7 +164,7 @@ final class AppWLocHTTPProxyServer {
                 throw AppWLocProxyError.tlsIdentityMissing(error)
             }
             AppWLocUtils.debugLog(
-                "\(AppWLocConfig.displayName) macOS TLS 服务端证书链 count=\(tlsCertificates.count)"
+                "[连接 \(connectionID)] macOS TLS 服务端证书链 count=\(tlsCertificates.count)"
             )
             #else
             let identity: SecIdentity
@@ -167,16 +177,20 @@ final class AppWLocHTTPProxyServer {
             let tlsCertificates: [Any] = [identity]
             #endif
 
+            stage = "发送 CONNECT 成功响应"
             try writeAll(Data("HTTP/1.1 200 Connection Established\r\n\r\n".utf8), to: clientFD)
-            AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 本地代理开始 TLS 握手 host=\(target.host)")
-            try handleTLSRequest(clientFD: clientFD, host: target.host, tlsCertificates: tlsCertificates)
+            stage = "TLS 握手及 HTTPS 请求处理"
+            AppWLocUtils.debugLog("[连接 \(connectionID)] 本地代理开始 TLS 握手 host=\(target.host)")
+            try handleTLSRequest(clientFD: clientFD, host: target.host, tlsCertificates: tlsCertificates, connectionID: connectionID)
+            AppWLocUtils.debugLog("[连接 \(connectionID)] 请求处理完成，host=\(targetDescription)，耗时=\(String(format: "%.3f", Date().timeIntervalSince(started)))s")
         } catch {
-            AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 代理连接结束：\(error.localizedDescription)")
+            AppWLocUtils.debugLog("[连接 \(connectionID)] 代理连接失败：host=\(targetDescription)，阶段=\(stage)，耗时=\(String(format: "%.3f", Date().timeIntervalSince(started)))s，错误=\(error as NSError)")
             close(clientFD)
         }
     }
 
-    private func handleTLSRequest(clientFD: Int32, host: String, tlsCertificates: [Any]) throws {
+    /// TLS 建立后记录 HTTP 处理和实际发送结果，不能把生成响应当作发送成功。
+    private func handleTLSRequest(clientFD: Int32, host: String, tlsCertificates: [Any], connectionID: String) throws {
         var readStreamRef: Unmanaged<CFReadStream>?
         var writeStreamRef: Unmanaged<CFWriteStream>?
         CFStreamCreatePairWithSocket(kCFAllocatorDefault, clientFD, &readStreamRef, &writeStreamRef)
@@ -205,14 +219,14 @@ final class AppWLocHTTPProxyServer {
         }
         // CFReadStreamOpen/CFWriteStreamOpen 只启动流。服务端 TLS 握手会在第一次
         // read/write 时真正推进，不能在这里把“流已启动”误报成“握手成功”。
-        AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 本地代理 TLS 流已启动 host=\(host)，等待客户端完成握手")
+        AppWLocUtils.debugLog("[连接 \(connectionID)] 本地代理 TLS 流已启动 host=\(host)，等待客户端完成握手")
         defer {
             inputStream.close()
             outputStream.close()
         }
 
-        let request = try readHTTPRequest(from: inputStream, host: host)
-        AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 本地代理 HTTPS \(request.method) https://\(request.host)\(request.path)")
+        let request = try readHTTPRequest(from: inputStream, host: host, connectionID: connectionID)
+        AppWLocUtils.debugLog("[连接 \(connectionID)] TLS 已完成并收到 HTTPS \(request.method) https://\(request.host)\(request.path)")
         let shouldLogWLoc = isWLocRequest(request)
         #if os(macOS)
         logMacOSRequest(request)
@@ -242,9 +256,11 @@ final class AppWLocHTTPProxyServer {
             }
             #endif
             try writeHTTPResponse(upstream: response, body: lockedResponse, to: outputStream)
+            AppWLocUtils.debugLog("[连接 \(connectionID)] 已向客户端发送构造响应，status=200，body=\(lockedResponse.count) bytes")
             return
         }
 
+        AppWLocUtils.debugLog("[连接 \(connectionID)] 转发上游，命中定位接口=\(shouldLogWLoc)")
         let upstream = try performUpstreamRequest(request)
         #if os(macOS)
         logMacOSResponse(
@@ -272,9 +288,12 @@ final class AppWLocHTTPProxyServer {
         #endif
 
         try writeHTTPResponse(upstream: upstream, body: upstream.body, to: outputStream)
+        AppWLocUtils.debugLog("[连接 \(connectionID)] 已向客户端发送上游响应，status=\(upstream.statusCode)，body=\(upstream.body.count) bytes")
     }
 
+    /// 上游使用独立会话直连，记录耗时以区分 TLS 和网络故障。
     private func performUpstreamRequest(_ request: AppWLocHTTPRequest) throws -> AppWLocHTTPResponse {
+        let started = Date()
         var urlRequest = URLRequest(url: request.url)
         urlRequest.httpMethod = request.method
         urlRequest.httpBody = request.body
@@ -307,7 +326,7 @@ final class AppWLocHTTPProxyServer {
                 let nsError = error as NSError
                 AppWLocUtils.debugLog(
                     [
-                        "\(AppWLocConfig.displayName) macOS 上游请求失败",
+                        "[连接 \(request.connectionID)] macOS 上游请求失败",
                         "URL：\(request.method) \(request.url.absoluteString)",
                         "错误：domain=\(nsError.domain)，code=\(nsError.code)，detail=\(nsError.localizedDescription)",
                         "Request Body 大小：\(request.body.count) bytes"
@@ -339,17 +358,19 @@ final class AppWLocHTTPProxyServer {
 
         semaphore.wait()
         session.invalidateAndCancel()
+        AppWLocUtils.debugLog("[连接 \(request.connectionID)] 上游请求结束，耗时=\(String(format: "%.3f", Date().timeIntervalSince(started)))s")
         if let result {
             return try result.get()
         }
         throw AppWLocProxyError.upstreamFailed
     }
 
+    /// 记录不改写和解析失败的原因，原有透传行为保持不变。
     private func buildLockedWLocResponseIfNeeded(_ request: AppWLocHTTPRequest) -> Data? {
         guard isWLocRequest(request),
               let state = AppWLocStateStore.shared.load() else {
             if isWLocRequest(request) {
-                AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 命中接口但未改写：锁定坐标不存在")
+                AppWLocUtils.debugLog("[连接 \(request.connectionID)] 命中接口但未改写：锁定坐标不存在")
             }
             return nil
         }
@@ -357,11 +378,11 @@ final class AppWLocHTTPProxyServer {
         do {
             let response = try AppWLocMutator.buildResponseBody(fromRequestBody: request.body, using: state)
             if let d = try? JSONEncoder().encode(state), let str = String(data: d, encoding: .utf8) {
-                AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 响应已按请求构造：\(request.host)\(request.path)，参数：\(str)")
+                AppWLocUtils.debugLog("[连接 \(request.connectionID)] 响应已按请求构造：\(request.host)\(request.path)，参数：\(str)")
             }
             return response
         } catch {
-            AppWLocUtils.debugLog("\(AppWLocConfig.displayName) 响应构造失败，已回退上游：\(error.localizedDescription)")
+            AppWLocUtils.debugLog("[连接 \(request.connectionID)] 响应构造失败，已回退上游：\(error as NSError)")
             return nil
         }
     }
@@ -372,10 +393,11 @@ final class AppWLocHTTPProxyServer {
     }
 
     #if os(macOS)
+    /// 保留原始请求，协议变化时可以根据完整正文离线分析。
     private func logMacOSRequest(_ request: AppWLocHTTPRequest) {
         AppWLocUtils.debugLog(
             [
-                "\(AppWLocConfig.displayName) macOS 收到 Request",
+                "[连接 \(request.connectionID)] macOS 收到 Request",
                 "URL：\(request.method) https://\(request.host)\(request.path)",
                 "请求头：\(formatHeaders(request.headers))",
                 "Request Body 大小：\(request.body.count) bytes",
@@ -384,6 +406,7 @@ final class AppWLocHTTPProxyServer {
         )
     }
 
+    /// 构造、上游和返回响应共用格式，并通过连接编号关联。
     private func logMacOSResponse(
         title: String,
         response: AppWLocHTTPResponse,
@@ -393,7 +416,7 @@ final class AppWLocHTTPProxyServer {
     ) {
         AppWLocUtils.debugLog(
             [
-                "\(AppWLocConfig.displayName) macOS \(title)",
+                "[连接 \(request.connectionID)] macOS \(title)",
                 "URL：https://\(request.host)\(request.path)",
                 "状态码：\(response.statusCode)",
                 "响应头：\(formatHeaders(response.headers))",
@@ -511,7 +534,8 @@ final class AppWLocHTTPProxyServer {
         try writeAll(body, to: stream)
     }
 
-    private func readHTTPRequest(from stream: InputStream, host: String) throws -> AppWLocHTTPRequest {
+    /// 保留完整头部，正文尚未收齐时也能定位客户端使用的编码和长度。
+    private func readHTTPRequest(from stream: InputStream, host: String, connectionID: String) throws -> AppWLocHTTPRequest {
         let headerAndMaybeBody = try readStreamHeader(from: stream)
         let delimiter = Data("\r\n\r\n".utf8)
         guard let headerRange = headerAndMaybeBody.range(of: delimiter),
@@ -523,6 +547,9 @@ final class AppWLocHTTPProxyServer {
         }
 
         let lines = rawHeader.components(separatedBy: "\r\n")
+        #if os(macOS)
+        AppWLocUtils.debugLog("[连接 \(connectionID)] TLS 已收到 HTTP 头：\n\(rawHeader)")
+        #endif
         guard let requestLine = lines.first else {
             throw AppWLocProxyError.httpRequestInvalid
         }
@@ -556,6 +583,7 @@ final class AppWLocHTTPProxyServer {
         }
 
         return AppWLocHTTPRequest(
+            connectionID: connectionID,
             method: requestParts[0],
             host: host,
             path: path,
@@ -692,6 +720,7 @@ final class AppWLocHTTPProxyServer {
         }
     }
 
+    /// 写入失败时记录已发送长度和底层错误，避免只留下笼统的上游失败。
     private func writeAll(_ data: Data, to stream: OutputStream) throws {
         try data.withUnsafeBytes { rawBuffer in
             guard let baseAddress = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
@@ -699,6 +728,7 @@ final class AppWLocHTTPProxyServer {
             while offset < data.count {
                 let written = stream.write(baseAddress.advanced(by: offset), maxLength: data.count - offset)
                 if written <= 0 {
+                    AppWLocUtils.debugLog("TLS/HTTP 写入失败：期望=\(data.count) bytes，已写入=\(offset) bytes，返回=\(written)，streamStatus=\(stream.streamStatus.rawValue)，error=\(String(describing: stream.streamError as NSError?))")
                     throw AppWLocProxyError.upstreamFailed
                 }
                 offset += written
@@ -722,6 +752,7 @@ final class AppWLocHTTPProxyServer {
 }
 
 private struct AppWLocHTTPRequest {
+    let connectionID: String
     let method: String
     let host: String
     let path: String
