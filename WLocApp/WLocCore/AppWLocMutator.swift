@@ -33,13 +33,23 @@ enum AppWLocMutatorError: Error, LocalizedError {
 struct AppWLocMutator {
     private static let responsePrefix = Data([0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])
 
+    /// 基于请求构造响应，Mac 日志额外记录客户端系统和协议结构，方便比对新系统。
     static func buildResponseBody(fromRequestBody raw: Data, using state: AppWLocLockState) throws -> Data {
         guard !raw.isEmpty else {
             throw AppWLocMutatorError.emptyBody
         }
 
         let arpc = try AppWLocARPC(data: raw)
+        #if os(macOS)
+        AppWLocUtils.debugLog("WLoc ARPC 解析：version=\(arpc.version)，locale=\(arpc.locale)，app=\(arpc.appIdentifier)，OS=\(arpc.osVersion)，functionID=\(arpc.functionID)，payload=\(arpc.payload.count) bytes")
+        #endif
         var message = try AppWLocModel(serializedData: arpc.payload)
+        #if os(macOS)
+        AppWLocUtils.debugLog("WLoc Protobuf 解析：WiFi数量=\(message.wifiDevices.count)，基站数量=\(message.cellTowerResponse.count)，设备系统=\(message.deviceType?.operatingSystem ?? "未提供")，型号=\(message.deviceType?.model ?? "未提供")，未知字段=\(message.unknownFields.data.count) bytes")
+        if message.wifiDevices.isEmpty {
+            AppWLocUtils.debugLog("WLoc 请求没有 WiFi 条目，构造的响应不会包含锁定后的 WiFi 位置")
+        }
+        #endif
         applyLockedLocation(to: &message, using: state)
 
         let protobuf = try message.serializedData()

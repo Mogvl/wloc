@@ -147,6 +147,7 @@ final class WLocMacMapViewController: NSViewController {
     private let favoriteButton = WLocMacActionButton(title: "加入收藏")
     private let coordinateInputButton = WLocMacActionButton(title: "经纬度选点")
     private let tutorialButton = WLocMacActionButton(title: "教程与证书")
+    private let debugLogButton = WLocMacActionButton(title: "查看日志")
     private let telegramButton = WLocMacActionButton(
         title: "Telegram",
         color: NSColor(calibratedRed: 0.08, green: 0.52, blue: 0.82, alpha: 1)
@@ -172,6 +173,7 @@ final class WLocMacMapViewController: NSViewController {
     private var hasSelectedAnnotation = false
     private var reverseGeocodeWorkItem: DispatchWorkItem?
     private var tutorialWindow: WLocMacTutorialWindowController?
+    private var debugLogWindow: WLocMacDebugLogWindowController?
     private var mapClickGesture: NSClickGestureRecognizer?
     private weak var controlsPanel: NSView?
     private var outsideSearchClickMonitor: Any?
@@ -316,6 +318,7 @@ final class WLocMacMapViewController: NSViewController {
         configureIconButton(restoreButton, symbol: "arrow.counterclockwise", label: "还原定位")
         configureIconButton(favoriteButton, symbol: "star", label: "加入收藏")
         configureIconButton(coordinateInputButton, symbol: "scope", label: "输入经纬度选点")
+        configureIconButton(debugLogButton, symbol: "doc.text.magnifyingglass", label: "查看日志")
         configureIconButton(zoomInButton, symbol: "plus", label: "放大地图")
         configureIconButton(zoomOutButton, symbol: "minus", label: "缩小地图")
         configureIconButton(currentLocationButton, symbol: "location", label: "回到当前位置")
@@ -342,6 +345,8 @@ final class WLocMacMapViewController: NSViewController {
         coordinateInputButton.action = #selector(openCoordinateInput)
         tutorialButton.target = self
         tutorialButton.action = #selector(openTutorial)
+        debugLogButton.target = self
+        debugLogButton.action = #selector(openDebugLog)
         telegramButton.target = self
         telegramButton.action = #selector(openTelegram)
         githubButton.target = self
@@ -485,19 +490,19 @@ final class WLocMacMapViewController: NSViewController {
             make.width.height.equalTo(30)
         }
 
-        let toolbar = NSStackView(views: [advancedLockButton, restoreButton, coordinateInputButton, NSView(), tutorialButton])
+        let toolbar = NSStackView(views: [advancedLockButton, restoreButton, coordinateInputButton, debugLogButton, NSView(), tutorialButton])
         toolbar.orientation = .horizontal
         toolbar.alignment = .centerY
         toolbar.distribution = .fill
         toolbar.spacing = 6
-        [advancedLockButton, restoreButton, coordinateInputButton].forEach { button in
+        [advancedLockButton, restoreButton, coordinateInputButton, debugLogButton].forEach { button in
             button.snp.makeConstraints { make in make.width.height.equalTo(32) }
         }
         tutorialButton.snp.makeConstraints { make in
-            make.width.equalTo(136)
+            make.width.equalTo(124)
             make.height.equalTo(32)
         }
-        toolbar.views[3].setContentHuggingPriority(.defaultLow, for: .horizontal)
+        toolbar.views[4].setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         let favoriteTitle = NSTextField.wlocLabel("收藏地点")
         favoriteTitle.font = .systemFont(ofSize: 12, weight: .semibold)
@@ -970,6 +975,15 @@ final class WLocMacMapViewController: NSViewController {
         let controller = WLocMacTutorialWindowController()
         tutorialWindow = controller
         controller.showWindow(self)
+    }
+
+    /// 主界面和帮助菜单共用日志窗口，重复点击不新建窗口。
+    @objc func openDebugLog() {
+        if debugLogWindow == nil {
+            debugLogWindow = WLocMacDebugLogWindowController()
+        }
+        debugLogWindow?.showWindow(self)
+        pacManager.logDiagnostics { [weak self] in self?.debugLogWindow?.reloadLog() }
     }
 
     @objc private func openTelegram() {
